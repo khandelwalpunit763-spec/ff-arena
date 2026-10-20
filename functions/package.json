@@ -1,0 +1,14 @@
+{
+  "name": "ff-arena-functions",
+  "private": true,
+  "description": "OPTIONAL payment-gateway Cloud Functions (Blaze plan): Razorpay + TournaPay hooks",
+  "main": "index.js",
+  "engines": { "node": "22" },
+  "scripts": {
+    "deploy": "firebase deploy --only functions"
+  },
+  "dependencies": {
+    "firebase-admin": "^14.5.0",
+    "firebase-functions": "^7.0.0"
+  }
+}

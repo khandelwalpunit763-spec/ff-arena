@@ -1,0 +1,43 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!--
+  Cordova template for the FF Arena PLAYER app.
+  1) npm i -g cordova
+  2) cordova create ffarena-apk com.ffarena.app "FF Arena" && cd ffarena-apk
+  3) replace this project's config.xml with this file, delete www/, copy ../www → ./www
+  4) cordova platform add android && cordova plugin add cordova-plugin-inappbrowser
+  5) cordova build android --release   (sign with your keystore)
+-->
+<widget id="com.ffarena.app" version="1.0.0" xmlns="http://www.w3.org/ns/widgets" xmlns:cdv="http://cordova.apache.org/ns/1.0">
+    <name>FF Arena</name>
+    <description>Free Fire tournaments – play, win, withdraw.</description>
+    <author email="support@ffarena.gg" href="https://ffarena.gg">FF Arena</author>
+    <content src="index.html" />
+
+    <!-- Load app from https://localhost (modern WebView origin: IndexedDB, reCAPTCHA, ES2020 OK) -->
+    <preference name="Scheme" value="https" />
+    <preference name="Hostname" value="localhost" />
+    <preference name="android-minSdkVersion" value="24" />
+    <preference name="BackgroundColor" value="0xff06080f" />
+    <preference name="StatusBarBackgroundColor" value="#06080f" />
+    <preference name="AndroidWindowSplashScreenBackground" value="#06080f" />
+
+    <!-- Network -->
+    <access origin="*" />
+    <allow-navigation href="https://*.googleapis.com/*" />
+    <allow-navigation href="https://*.firebaseapp.com/*" />
+    <allow-navigation href="https://www.google.com/recaptcha/*" />
+    <allow-navigation href="https://checkout.razorpay.com/*" />
+
+    <!-- External intents: UPI apps (GPay / PhonePe / Paytm), WhatsApp support, phone, mail -->
+    <allow-intent href="upi:*" />
+    <allow-intent href="https://*/*" />
+    <allow-intent href="tel:*" />
+    <allow-intent href="mailto:*" />
+    <allow-intent href="whatsapp:*" />
+    <platform name="android">
+        <allow-intent href="market:*" />
+        <allow-intent href="intent:*" />
+    </platform>
+
+    <plugin name="cordova-plugin-inappbrowser" spec="^6.0.0" />
+</widget>

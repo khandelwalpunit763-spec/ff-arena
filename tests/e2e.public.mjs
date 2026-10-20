@@ -1,0 +1,27 @@
+// Quick smoke test against any deployed URL:  BASE_URL=https://your-app.web.app node tests/e2e.public.mjs
+import { chromium } from 'playwright';
+const BASE = process.env.BASE_URL || `https://3000-${process.env.E2B_SANDBOX_ID}.e2b.app`;
+const browser = await chromium.launch();
+const p = await (await browser.newContext({ viewport: { width: 390, height: 844 } })).newPage();
+const errs = [];
+p.on('console', (m) => { if (m.type() === 'error') errs.push(m.text().slice(0, 160)); });
+const t0 = Date.now();
+await p.goto(`${BASE}/#/login`);
+await p.waitForSelector('#login-form', { timeout: 20000 });
+await p.click('.demo-chip >> nth=1');
+await p.click('#login-btn');
+await p.waitForSelector('.match-card', { timeout: 20000 });
+console.log('player login + live data over public HTTPS in', (Date.now() - t0) / 1000, 's');
+await p.click('.match-card:has-text("Squad Night Clash")');
+await p.waitForSelector('.detail-banner', { timeout: 15000 });
+await p.click('.sticky-cta a.btn-primary');
+await p.waitForSelector('.team-list', { timeout: 15000 });
+await p.click('[data-slot="9"]');
+await p.fill('input[name=ign]', 'ROHIT_YT');
+await p.fill('input[name=ffUid]', '2234567890');
+await p.screenshot({ path: 'docs/screenshots/17-player-join-squad.png' });
+await p.click('#join-btn');
+await p.waitForSelector('.success-sheet', { timeout: 20000 });
+console.log('squad join over public URL OK in', (Date.now() - t0) / 1000, 's');
+console.log('errors:', errs.filter((e) => !/favicon/.test(e)));
+await browser.close();

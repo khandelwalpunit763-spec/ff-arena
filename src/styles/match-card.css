@@ -1,0 +1,33 @@
+/* Shared tournament card (player app + admin live preview) */
+/* ───── Match card ───── */
+.match-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; cursor: pointer; transition: transform .15s, border-color .2s, box-shadow .2s; }
+.match-card:hover { border-color: rgba(255, 138, 31, .35); box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+.match-card:active { transform: scale(.99); }
+.mc-banner, .detail-banner, .join-summary { position: relative; background-size: cover; background-position: center; }
+.mc-banner { height: 150px; padding: 12px; display: flex; flex-direction: column; justify-content: space-between; }
+.mc-banner-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.mc-title { font-size: 22px; text-shadow: 0 2px 12px rgba(0,0,0,.6); }
+.mc-meta { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: rgba(255,255,255,.82); margin-top: 3px; }
+.mc-meta .i { width: 14px; height: 14px; }
+.mc-stats { display: grid; grid-template-columns: repeat(3, 1fr); padding: 12px 6px 4px; }
+.mc-stats > div { display: flex; flex-direction: column; align-items: center; gap: 2px; border-right: 1px solid var(--border); }
+.mc-stats > div:last-child { border-right: 0; }
+.mc-stats span { font-size: 10.5px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); font-weight: 600; }
+.mc-stats strong { font-family: var(--font-head); font-size: 21px; }
+.mc-foot { display: flex; align-items: center; gap: 14px; padding: 10px 14px 12px; }
+.mc-slots { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.mc-slots small { color: var(--muted); font-size: 12px; }
+.mc-slots small b { color: var(--text); }
+.mc-host { display: flex; align-items: center; gap: 6px; padding: 9px 14px; border-top: 1px solid var(--border); background: rgba(255,255,255,.015); font-size: 12px; color: var(--muted); }
+.mc-host .i { width: 14px; height: 14px; color: var(--accent); }
+.mc-host b { color: var(--text-2); font-weight: 600; }
+.mc-myslot { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; color: #6ee7a0; font-weight: 600; }
+.match-card.phase-completed .mc-banner, .match-card.phase-cancelled .mc-banner { filter: saturate(.55); }
+
+/* Map art (AI-generated banners) with gradient fallbacks */
+.map-bermuda, .map-bermuda-remastered { background-image: linear-gradient(180deg, rgba(6,8,15,.05) 0%, rgba(6,8,15,.88) 100%), url(../assets/maps/bermuda.jpg), linear-gradient(135deg, #0f766e, #0c4a6e); }
+.map-purgatory { background-image: linear-gradient(180deg, rgba(6,8,15,.05) 0%, rgba(6,8,15,.88) 100%), url(../assets/maps/purgatory.jpg), linear-gradient(135deg, #7c2d12, #1e293b); }
+.map-kalahari { background-image: linear-gradient(180deg, rgba(6,8,15,.05) 0%, rgba(6,8,15,.88) 100%), url(../assets/maps/kalahari.jpg), linear-gradient(135deg, #b45309, #78350f); }
+.map-alpine { background-image: linear-gradient(180deg, rgba(6,8,15,.05) 0%, rgba(6,8,15,.88) 100%), url(../assets/maps/alpine.jpg), linear-gradient(135deg, #64748b, #1e3a8a); }
+.map-nexterra { background-image: linear-gradient(180deg, rgba(6,8,15,.05) 0%, rgba(6,8,15,.88) 100%), url(../assets/maps/nexterra.jpg), linear-gradient(135deg, #6d28d9, #0e7490); }
+

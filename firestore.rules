@@ -1,0 +1,519 @@
+rules_version = '2';
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  FF ARENA – Paid Free Fire Tournament Platform – Firestore Security Rules
+// ───────────────────────────────────────────────────────────────────────────
+//  Design principles
+//   1. Money never moves without a paired, create-only "reason" document in the
+//      SAME atomic batch/transaction (player entry, result, refund, deposit,
+//      withdrawal). Every wallet write carries `lastRef {type,id}` and the rules
+//      re-calculate the exact amount from that reason document.
+//   2. Reason documents are create-only  →  every payout/charge is idempotent
+//      (a result or refund can never be credited twice).
+//   3. Roles live in /staff/{uid}  ('super' | 'staff', active flag). Staff can
+//      only manage matches where hostId == their uid. Only the Super Admin can
+//      touch /config, /staff, withdrawals and arbitrary wallet adjustments.
+//   4. Slot booking is a create-only lock doc  →  two users can never own the
+//      same slot, even when they click at the exact same millisecond.
+// ═══════════════════════════════════════════════════════════════════════════
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ───────────── Generic helpers ─────────────
+    function signedIn() { return request.auth != null; }
+    function me() { return request.auth.uid; }
+    function isOwner(userId) { return signedIn() && request.auth.uid == userId; }
+    function onlyChanged(keys) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys); }
+    function isMoney(v) { return v is int && v >= 0; }
+    function teamSize(t) { return t == 'solo' ? 1 : (t == 'duo' ? 2 : 4); }
+    function roomUnlockAt(startAt) { return startAt - duration.value(15, 'm'); }
+
+    // ───────────── Document paths ─────────────
+    function staffPath(u)     { return /databases/$(database)/documents/staff/$(u); }
+    function userPath(u)      { return /databases/$(database)/documents/users/$(u); }
+    function walletPath(u)    { return /databases/$(database)/documents/wallets/$(u); }
+    function configPath()     { return /databases/$(database)/documents/config/app; }
+    function matchPath(m)     { return /databases/$(database)/documents/matches/$(m); }
+    function slotPath(m, s)   { return /databases/$(database)/documents/matches/$(m)/slots/$(s); }
+    function playerPath(m, u) { return /databases/$(database)/documents/matches/$(m)/players/$(u); }
+    function resultPath(m, u) { return /databases/$(database)/documents/matches/$(m)/results/$(u); }
+    function refundPath(m, u) { return /databases/$(database)/documents/matches/$(m)/refunds/$(u); }
+    function withdrawPath(w)  { return /databases/$(database)/documents/withdrawals/$(w); }
+    function depositPath(d)   { return /databases/$(database)/documents/deposits/$(d); }
+
+    // ───────────── Roles ─────────────
+    function staffData() { return get(staffPath(request.auth.uid)).data; }
+    function isStaff() { return signedIn() && exists(staffPath(request.auth.uid)) && staffData().active == true; }
+    function isSuper() { return isStaff() && staffData().role == 'super'; }
+    function canVerifyDeposits() {
+      return isSuper() || (isStaff() && staffData().get('perms', {}).get('deposits', false) == true);
+    }
+    // Host = the staff member who created the match (admin_id) – or the Super Admin.
+    function isHost(m) {
+      return isStaff() && (staffData().role == 'super' || get(matchPath(m)).data.hostId == request.auth.uid);
+    }
+    function appConfig() { return get(configPath()).data; }
+
+    // First-run bootstrap: ONLY these e-mails may claim the very first Super Admin
+    // seat (and only while /config/app does not exist yet). EDIT BEFORE DEPLOYING!
+    function isBootstrapOwner() {
+      return signedIn() && request.auth.token.email in ['owner@ffarena.gg'];
+    }
+
+    // ───────────── Wallet helpers ─────────────
+    function walletTotal(w) { return w.deposit + w.winning; }
+    function walletRefIs(u, type, id) {
+      let r = getAfter(walletPath(u)).data.lastRef;
+      return r.type == type && r.id == id;
+    }
+    function validWalletShape() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['deposit', 'winning', 'updatedAt', 'lastRef'])
+        && isMoney(d.deposit) && isMoney(d.winning)
+        && d.updatedAt == request.time
+        && d.lastRef is map && d.lastRef.keys().hasOnly(['type', 'id'])
+        && d.lastRef.type is string && d.lastRef.id is string;
+    }
+    // Player pays an entry fee  (paired with matches/{m}/players/{u} create)
+    function walletJoin(u) {
+      let m = request.resource.data.lastRef.id;
+      let pl = getAfter(playerPath(m, u)).data;
+      return isOwner(u)
+        && !exists(playerPath(m, u)) && existsAfter(playerPath(m, u))
+        && request.resource.data.deposit == resource.data.deposit - pl.fromDeposit
+        && request.resource.data.winning == resource.data.winning - pl.fromWinning;
+    }
+    // Player requests a withdrawal → winning balance is held immediately
+    function walletWithdraw(u) {
+      let w = request.resource.data.lastRef.id;
+      let wd = getAfter(withdrawPath(w)).data;
+      return isOwner(u)
+        && !exists(withdrawPath(w)) && existsAfter(withdrawPath(w))
+        && wd.uid == u
+        && request.resource.data.winning == resource.data.winning - wd.amount
+        && request.resource.data.deposit == resource.data.deposit;
+    }
+    // Host staff credits winnings (paired with results/{u} create – formula checked there)
+    function walletWin(u) {
+      let m = request.resource.data.lastRef.id;
+      return isHost(m)
+        && !exists(resultPath(m, u)) && existsAfter(resultPath(m, u))
+        && request.resource.data.winning == resource.data.winning + getAfter(resultPath(m, u)).data.amount
+        && request.resource.data.deposit == resource.data.deposit;
+    }
+    // Host staff refunds a cancelled match – money goes back exactly where it came from
+    function walletRefund(u) {
+      let m = request.resource.data.lastRef.id;
+      let pl = get(playerPath(m, u)).data;
+      return isHost(m)
+        && !exists(refundPath(m, u)) && existsAfter(refundPath(m, u))
+        && request.resource.data.deposit == resource.data.deposit + pl.fromDeposit
+        && request.resource.data.winning == resource.data.winning + pl.fromWinning;
+    }
+    // Super Admin / permitted staff approves a manual UPI deposit
+    function walletDeposit(u) {
+      let d = request.resource.data.lastRef.id;
+      let dep = get(depositPath(d)).data;
+      return canVerifyDeposits()
+        && dep.uid == u && dep.status == 'pending'
+        && getAfter(depositPath(d)).data.status == 'approved'
+        && request.resource.data.deposit == resource.data.deposit + dep.amount
+        && request.resource.data.winning == resource.data.winning;
+    }
+    // Super Admin rejects a withdrawal → held amount goes back to winning balance
+    function walletWithdrawReject(u) {
+      let w = request.resource.data.lastRef.id;
+      let wd = get(withdrawPath(w)).data;
+      return isSuper()
+        && wd.uid == u && wd.status == 'pending'
+        && getAfter(withdrawPath(w)).data.status == 'rejected'
+        && request.resource.data.winning == resource.data.winning + wd.amount
+        && request.resource.data.deposit == resource.data.deposit;
+    }
+    function validWalletUpdate(u) {
+      let t = request.resource.data.lastRef.type;
+      return validWalletShape() && (
+           (t == 'join'      && walletJoin(u))
+        || (t == 'withdraw'  && walletWithdraw(u))
+        || (t == 'win'       && walletWin(u))
+        || (t == 'refund'    && walletRefund(u))
+        || (t == 'deposit'   && walletDeposit(u))
+        || (t == 'wd_reject' && walletWithdrawReject(u))
+        || (t == 'adjust'    && isSuper())
+      );
+    }
+    // Ledger entry must mirror the wallet delta of the same batch, id = "<type>_<refId>"
+    function validTxn(u, txnId) {
+      let before = get(walletPath(u)).data;
+      let after = getAfter(walletPath(u)).data;
+      let d = request.resource.data;
+      return d.keys().hasOnly(['type', 'amount', 'refId', 'note', 'createdAt'])
+        && txnId == after.lastRef.type + '_' + after.lastRef.id
+        && d.type == after.lastRef.type && d.refId == after.lastRef.id
+        && d.amount == walletTotal(after) - walletTotal(before)
+        && d.note is string && d.note.size() <= 120
+        && d.createdAt == request.time;
+    }
+
+    // ───────────── Match helpers ─────────────
+    function validMatchFields(d) {
+      let lim = appConfig().limits;
+      return d.title is string && d.title.size() >= 3 && d.title.size() <= 80
+        && d.type in ['solo', 'duo', 'squad']
+        && d.map is string && d.map.size() >= 3 && d.map.size() <= 30
+        && d.startAt is timestamp
+        && isMoney(d.entryFee) && d.entryFee <= lim.maxEntryFee
+        && isMoney(d.perKill) && d.perKill <= lim.maxPerKill
+        && isMoney(d.prizePool) && d.prizePool <= lim.maxPrizePool
+        && d.rankPrizes is map && d.rankPrizes.size() <= 10
+        && d.totalSlots is int && d.totalSlots >= 2 && d.totalSlots <= 100
+        && d.totalSlots % teamSize(d.type) == 0
+        && d.description is string && d.description.size() <= 1500;
+    }
+    function validNewMatch() {
+      let d = request.resource.data;
+      let keys = ['title', 'type', 'map', 'startAt', 'entryFee', 'perKill', 'prizePool', 'rankPrizes',
+                  'totalSlots', 'description', 'hostId', 'hostName', 'status', 'joinedCount', 'collected',
+                  'rankPaid', 'killsPaid', 'distributed', 'resultsCount', 'refunded', 'refundedCount',
+                  'roomPublishedAt', 'createdAt', 'updatedAt'];
+      return isStaff()
+        && d.keys().hasOnly(keys) && d.keys().hasAll(keys)
+        && d.hostId == request.auth.uid && d.hostName == staffData().name      // admin_id / staff_name tag
+        && d.status == 'upcoming' && d.startAt > request.time
+        && d.joinedCount == 0 && d.collected == 0 && d.rankPaid == 0 && d.killsPaid == 0
+        && d.distributed == 0 && d.resultsCount == 0 && d.refunded == 0 && d.refundedCount == 0
+        && d.roomPublishedAt == null
+        && d.createdAt == request.time && d.updatedAt == request.time
+        && validMatchFields(d);
+    }
+    // A player joining: only the counters move, by exactly +1 seat and +entryFee
+    function validJoinUpdate(m) {
+      let o = resource.data;
+      let d = request.resource.data;
+      return signedIn()
+        && onlyChanged(['joinedCount', 'collected'])
+        && o.status == 'upcoming' && request.time < o.startAt
+        && d.joinedCount == o.joinedCount + 1 && d.joinedCount <= o.totalSlots
+        && d.collected == o.collected + o.entryFee
+        && !exists(playerPath(m, request.auth.uid)) && existsAfter(playerPath(m, request.auth.uid));
+    }
+    function hostOfResource() {
+      return isStaff() && (staffData().role == 'super' || resource.data.hostId == request.auth.uid);
+    }
+    function editDetails() {
+      let o = resource.data;
+      let d = request.resource.data;
+      let basic = ['title', 'startAt', 'map', 'description', 'updatedAt'];
+      let money = ['entryFee', 'perKill', 'prizePool', 'rankPrizes', 'totalSlots', 'type'];
+      return o.status == 'upcoming'
+        && (onlyChanged(basic) || (o.joinedCount == 0 && onlyChanged(basic.concat(money))))
+        && d.startAt > request.time && d.updatedAt == request.time
+        && validMatchFields(d);
+    }
+    function statusChange() {
+      let o = resource.data;
+      let d = request.resource.data;
+      return onlyChanged(['status', 'updatedAt']) && d.updatedAt == request.time && (
+           (o.status == 'upcoming' && d.status == 'live' && request.time >= roomUnlockAt(o.startAt))
+        || (o.status == 'live' && d.status == 'completed')
+        || (o.status in ['upcoming', 'live'] && d.status == 'cancelled' && o.distributed == 0 && o.resultsCount == 0)
+      );
+    }
+    function roomFlag() {
+      let o = resource.data;
+      return onlyChanged(['roomPublishedAt', 'updatedAt'])
+        && request.resource.data.roomPublishedAt == request.time
+        && o.status in ['upcoming', 'live']
+        && request.time >= roomUnlockAt(o.startAt);
+    }
+    function resultCounters(m) {
+      let o = resource.data;
+      let d = request.resource.data;
+      let r = getAfter(resultPath(m, d.lastResult)).data;
+      return o.status == 'live'
+        && onlyChanged(['rankPaid', 'killsPaid', 'distributed', 'resultsCount', 'lastResult', 'updatedAt'])
+        && d.lastResult is string
+        && !exists(resultPath(m, d.lastResult)) && existsAfter(resultPath(m, d.lastResult))
+        && d.rankPaid == o.rankPaid + r.rankAmount && d.rankPaid <= o.prizePool     // prize-pool hard cap
+        && d.killsPaid == o.killsPaid + r.kills && d.killsPaid <= o.joinedCount    // kill-bonus hard cap
+        && d.distributed == o.distributed + r.amount
+        && d.resultsCount == o.resultsCount + 1;
+    }
+    function refundCounters(m) {
+      let o = resource.data;
+      let d = request.resource.data;
+      let pl = get(playerPath(m, d.lastRefund)).data;
+      return o.status == 'cancelled'
+        && onlyChanged(['refunded', 'refundedCount', 'lastRefund', 'updatedAt'])
+        && !exists(refundPath(m, d.lastRefund)) && existsAfter(refundPath(m, d.lastRefund))
+        && d.refunded == o.refunded + pl.fromDeposit + pl.fromWinning
+        && d.refundedCount == o.refundedCount + 1;
+    }
+    function validSlot(m, s) {
+      let d = request.resource.data;
+      let pl = getAfter(playerPath(m, request.auth.uid)).data;
+      return s.matches('^[0-9]{1,3}$')
+        && d.keys().hasOnly(['slotNo', 'uid', 'ign', 'ffUid', 'joinedAt'])
+        && d.uid == request.auth.uid && d.slotNo == int(s)
+        && d.slotNo >= 1 && d.slotNo <= get(matchPath(m)).data.totalSlots
+        && d.joinedAt == request.time
+        && pl.slotNo == d.slotNo && pl.ign == d.ign && pl.ffUid == d.ffUid;
+    }
+    function validPlayer(m, u) {
+      let d = request.resource.data;
+      let mt = get(matchPath(m)).data;
+      return d.keys().hasOnly(['uid', 'slotNo', 'ign', 'ffUid', 'fromDeposit', 'fromWinning', 'joinedAt'])
+        && d.uid == u
+        && d.ign is string && d.ign.size() >= 2 && d.ign.size() <= 24
+        && d.ffUid is string && d.ffUid.matches('^[0-9]{5,15}$')
+        && d.slotNo is int
+        && isMoney(d.fromDeposit) && isMoney(d.fromWinning)
+        && d.fromDeposit + d.fromWinning == mt.entryFee
+        && d.joinedAt == request.time
+        && mt.status == 'upcoming' && request.time < mt.startAt
+        && get(userPath(u)).data.get('banned', false) == false
+        && existsAfter(slotPath(m, string(d.slotNo)))
+        && getAfter(matchPath(m)).data.joinedCount == mt.joinedCount + 1
+        && (mt.entryFee == 0 || walletRefIs(u, 'join', m));
+    }
+    function validRoom(m) {
+      let mt = get(matchPath(m)).data;
+      let d = request.resource.data;
+      return d.keys().hasOnly(['roomId', 'roomPass', 'updatedAt', 'by'])
+        && d.roomId is string && d.roomId.size() >= 3 && d.roomId.size() <= 30
+        && d.roomPass is string && d.roomPass.size() <= 30
+        && d.updatedAt == request.time && d.by == request.auth.uid
+        && mt.status in ['upcoming', 'live']
+        && request.time >= roomUnlockAt(mt.startAt);                    // 15-minute rule
+    }
+    // THE BACKEND PRIZE FORMULA (mirrors src/shared/prize.js):
+    //   killAmount = kills × perKill ; rankAmount = rankPrizes[rank] ; amount = killAmount + rankAmount
+    function validResult(m, u) {
+      let mt = get(matchPath(m)).data;
+      let after = getAfter(matchPath(m)).data;
+      let pl = get(playerPath(m, u)).data;
+      let d = request.resource.data;
+      return d.keys().hasOnly(['uid', 'ign', 'slotNo', 'kills', 'rank', 'killAmount', 'rankAmount', 'amount', 'by', 'createdAt'])
+        && d.uid == u && d.slotNo == pl.slotNo && d.ign == pl.ign
+        && mt.status == 'live'
+        && d.kills is int && d.kills >= 0 && d.kills <= 99
+        && d.rank is int && d.rank >= 1 && d.rank <= mt.totalSlots
+        && d.killAmount == d.kills * mt.perKill
+        && d.rankAmount == mt.rankPrizes.get(string(d.rank), 0)
+        && d.amount == d.killAmount + d.rankAmount
+        && d.by == request.auth.uid && d.createdAt == request.time
+        && after.lastResult == u && after.resultsCount == mt.resultsCount + 1
+        && (d.amount == 0 || walletRefIs(u, 'win', m));
+    }
+    function validRefund(m, u) {
+      let mt = get(matchPath(m)).data;
+      let pl = get(playerPath(m, u)).data;
+      let d = request.resource.data;
+      let amt = pl.fromDeposit + pl.fromWinning;
+      return d.keys().hasOnly(['uid', 'amount', 'by', 'createdAt'])
+        && d.uid == u && d.amount == amt
+        && mt.status == 'cancelled'
+        && d.by == request.auth.uid && d.createdAt == request.time
+        && getAfter(matchPath(m)).data.lastRefund == u
+        && (amt == 0 || walletRefIs(u, 'refund', m));
+    }
+
+    // ───────────── Finance helpers ─────────────
+    function validWithdrawal(w) {
+      let d = request.resource.data;
+      let c = appConfig();
+      return d.keys().hasOnly(['uid', 'userName', 'userEmail', 'amount', 'method', 'account', 'holder', 'status', 'createdAt'])
+        && d.uid == request.auth.uid && d.status == 'pending'
+        && d.amount is int && d.amount >= c.minWithdraw && d.amount <= c.maxWithdraw
+        && d.method in ['upi', 'paytm', 'phonepe', 'gpay']
+        && d.account is string && d.account.size() >= 5 && d.account.size() <= 60
+        && d.holder is string && d.holder.size() >= 2 && d.holder.size() <= 60
+        && d.userName is string && d.userName.size() <= 60
+        && d.userEmail == request.auth.token.email
+        && d.createdAt == request.time
+        && walletRefIs(request.auth.uid, 'withdraw', w);
+    }
+    function validWithdrawalProcess(w) {
+      let o = resource.data;
+      let d = request.resource.data;
+      return o.status == 'pending'
+        && onlyChanged(['status', 'processedBy', 'processedAt', 'txnRef', 'reason'])
+        && d.processedBy == request.auth.uid && d.processedAt == request.time
+        && ((d.status == 'paid' && d.txnRef is string && d.txnRef.size() >= 4 && d.txnRef.size() <= 60)
+            || (d.status == 'rejected' && d.reason is string && d.reason.size() <= 200
+                && walletRefIs(o.uid, 'wd_reject', w)));
+    }
+    function validDeposit(id) {
+      let d = request.resource.data;
+      let c = appConfig();
+      return id == d.utr                                                // doc id = UTR → a UTR can be claimed once
+        && d.keys().hasOnly(['uid', 'userName', 'userEmail', 'amount', 'utr', 'method', 'status', 'createdAt'])
+        && d.uid == request.auth.uid && d.status == 'pending' && d.method == 'upi'
+        && d.utr is string && d.utr.matches('^[0-9A-Za-z]{10,22}$')
+        && d.amount is int && d.amount >= c.minDeposit && d.amount <= c.maxDeposit
+        && d.userName is string && d.userName.size() <= 60
+        && d.userEmail == request.auth.token.email
+        && d.createdAt == request.time
+        && c.features.upiManual == true;
+    }
+    function validDepositProcess(id) {
+      let o = resource.data;
+      let d = request.resource.data;
+      return o.status == 'pending'
+        && onlyChanged(['status', 'processedBy', 'processedAt', 'reason'])
+        && d.processedBy == request.auth.uid && d.processedAt == request.time
+        && ((d.status == 'approved' && walletRefIs(o.uid, 'deposit', id))
+            || (d.status == 'rejected' && d.reason is string && d.reason.size() <= 200));
+    }
+
+    // ───────────── Profile / staff helpers ─────────────
+    function validProfileFields(d) {
+      return d.name is string && d.name.size() >= 2 && d.name.size() <= 40
+        && d.phone is string && d.phone.size() <= 15
+        && d.ign is string && d.ign.size() <= 24
+        && d.ffUid is string && d.ffUid.size() <= 15;
+    }
+    function validNewUser(u) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['uid', 'name', 'email', 'phone', 'ign', 'ffUid', 'phoneVerified', 'banned', 'createdAt'])
+        && d.uid == u && d.email == request.auth.token.email
+        && validProfileFields(d)
+        && d.phoneVerified == false && d.banned == false
+        && d.createdAt == request.time;
+    }
+    function validProfileUpdate() {
+      let d = request.resource.data;
+      return onlyChanged(['name', 'phone', 'ign', 'ffUid', 'phoneVerified', 'updatedAt'])
+        && validProfileFields(d)
+        && (d.phoneVerified == false
+            || request.auth.token.get('phone_number', '') == '+91' + d.phone);
+    }
+    function validStaffDoc(id) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['uid', 'name', 'email', 'role', 'active', 'perms', 'createdAt', 'createdBy', 'updatedAt'])
+        && d.uid == id && d.name is string && d.name.size() >= 2 && d.name.size() <= 40
+        && d.role in ['super', 'staff'] && d.active is bool && d.perms is map;
+    }
+    function bootstrapSuper(id) {
+      return isBootstrapOwner() && id == request.auth.uid
+        && !exists(configPath()) && existsAfter(configPath())
+        && request.resource.data.role == 'super' && request.resource.data.active == true
+        && validStaffDoc(id);
+    }
+
+    // ═════════════════════════ COLLECTIONS ═════════════════════════
+
+    // Global app settings (UPI id, limits, feature flags). Public read, Super Admin write.
+    match /config/{docId} {
+      allow read: if true;
+      allow create: if isSuper()
+        || (docId == 'app' && isBootstrapOwner() && !exists(staffPath(request.auth.uid))
+            && getAfter(staffPath(request.auth.uid)).data.role == 'super');
+      allow update, delete: if isSuper();
+    }
+
+    // Roles: 'super' | 'staff'. Only the Super Admin manages staff (10–15 co-admins).
+    match /staff/{staffId} {
+      allow read: if isOwner(staffId) || isSuper();
+      allow create: if (isSuper() && validStaffDoc(staffId)) || bootstrapSuper(staffId);
+      allow update: if isSuper() && validStaffDoc(staffId)
+        && (staffId != request.auth.uid
+            || (request.resource.data.role == 'super' && request.resource.data.active == true));
+      allow delete: if isSuper() && staffId != request.auth.uid;
+    }
+
+    // Player profiles
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isStaff();
+      allow create: if isOwner(userId) && validNewUser(userId);
+      allow update: if (isOwner(userId) && validProfileUpdate())
+        || (isStaff() && onlyChanged(['banned', 'updatedAt']) && request.resource.data.banned is bool);
+      allow delete: if false;
+    }
+
+    // Wallets: Deposit balance (play only) + Winning balance (withdrawable)
+    match /wallets/{userId} {
+      allow read: if isOwner(userId) || isStaff();
+      allow create: if isOwner(userId)
+        && request.resource.data.keys().hasOnly(['deposit', 'winning', 'updatedAt', 'lastRef'])
+        && request.resource.data.deposit == 0 && request.resource.data.winning == 0
+        && request.resource.data.updatedAt == request.time;
+      allow update: if validWalletUpdate(userId);
+      allow delete: if false;
+
+      match /txns/{txnId} {
+        allow read: if isOwner(userId) || isStaff();
+        allow create: if (isOwner(userId) || isStaff()) && validTxn(userId, txnId);
+        allow update, delete: if false;
+      }
+    }
+
+    // Tournaments
+    match /matches/{matchId} {
+      allow read: if signedIn();
+      allow create: if validNewMatch();
+      allow update: if validJoinUpdate(matchId)
+        || (hostOfResource() && (editDetails() || statusChange() || roomFlag()
+                                 || resultCounters(matchId) || refundCounters(matchId)));
+      allow delete: if isSuper() || (hostOfResource() && resource.data.joinedCount == 0);
+
+      // Slot lock: create-only → no double booking
+      match /slots/{slotId} {
+        allow read: if signedIn();
+        allow create: if signedIn() && validSlot(matchId, slotId);
+        allow update, delete: if false;
+      }
+      // One entry per user per match
+      match /players/{userId} {
+        allow read: if signedIn();
+        allow create: if isOwner(userId) && validPlayer(matchId, userId);
+        allow update, delete: if false;
+      }
+      // Room ID / password – visible only to joined players and staff
+      match /private/{docId} {
+        allow read: if (signedIn() && exists(playerPath(matchId, request.auth.uid))) || isStaff();
+        allow create, update: if docId == 'room' && isHost(matchId) && validRoom(matchId);
+        allow delete: if false;
+      }
+      // Results & payouts (create-only = credited exactly once)
+      match /results/{userId} {
+        allow read: if signedIn();
+        allow create: if isHost(matchId) && validResult(matchId, userId);
+        allow update, delete: if false;
+      }
+      match /refunds/{userId} {
+        allow read: if isOwner(userId) || isStaff();
+        allow create: if isHost(matchId) && validRefund(matchId, userId);
+        allow update, delete: if false;
+      }
+    }
+
+    // "My Matches" collection-group query
+    match /{path=**}/players/{userId} {
+      allow read: if signedIn();
+    }
+
+    // Withdrawal requests (approved by Super Admin only)
+    match /withdrawals/{wid} {
+      allow read: if (signedIn() && resource.data.uid == request.auth.uid) || isSuper();
+      allow create: if signedIn() && validWithdrawal(wid);
+      allow update: if isSuper() && validWithdrawalProcess(wid);
+      allow delete: if false;
+    }
+
+    // Manual UPI deposits (doc id = UTR). Gateway deposits are written by Cloud Functions.
+    match /deposits/{depId} {
+      allow read: if (signedIn() && (resource == null || resource.data.uid == request.auth.uid)) || canVerifyDeposits();
+      allow create: if signedIn() && validDeposit(depId);
+      allow update: if canVerifyDeposits() && validDepositProcess(depId);
+      allow delete: if false;
+    }
+
+    // Payment-gateway orders (Razorpay / TournaPay) – server (Admin SDK) only
+    match /paymentOrders/{orderId} {
+      allow read: if signedIn() && resource.data.uid == request.auth.uid;
+      allow write: if false;
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "hosting": {
+    "public": "www",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "headers": [
+      { "source": "**/*.@(js|css)", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }
+    ]
+  },
+  "functions": [
+    { "source": "functions", "codebase": "payments", "ignore": ["node_modules", ".git"] }
+  ],
+  "emulators": {
+    "auth": { "host": "127.0.0.1", "port": 9099 },
+    "firestore": { "host": "127.0.0.1", "port": 8080 },
+    "functions": { "host": "127.0.0.1", "port": 5001 },
+    "ui": { "enabled": false },
+    "singleProjectMode": false
+  }
+}

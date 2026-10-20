@@ -1,0 +1,27 @@
+{
+  "indexes": [
+    { "collectionGroup": "matches", "queryScope": "COLLECTION",
+      "fields": [{ "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "startAt", "order": "ASCENDING" }] },
+    { "collectionGroup": "matches", "queryScope": "COLLECTION",
+      "fields": [{ "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "startAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "matches", "queryScope": "COLLECTION",
+      "fields": [{ "fieldPath": "hostId", "order": "ASCENDING" }, { "fieldPath": "startAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "players", "queryScope": "COLLECTION_GROUP",
+      "fields": [{ "fieldPath": "uid", "order": "ASCENDING" }, { "fieldPath": "joinedAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "withdrawals", "queryScope": "COLLECTION",
+      "fields": [{ "fieldPath": "uid", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "withdrawals", "queryScope": "COLLECTION",
+      "fields": [{ "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "deposits", "queryScope": "COLLECTION",
+      "fields": [{ "fieldPath": "uid", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "deposits", "queryScope": "COLLECTION",
+      "fields": [{ "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] }
+  ],
+  "fieldOverrides": [
+    { "collectionGroup": "players", "fieldPath": "uid",
+      "indexes": [
+        { "order": "ASCENDING", "queryScope": "COLLECTION" },
+        { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }
+      ] }
+  ]
+}
